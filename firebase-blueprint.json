@@ -1,0 +1,37 @@
+{
+  "entities": {
+    "ScheduledPost": {
+      "title": "Scheduled Post",
+      "description": "A video post scheduled for upload",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "videoUrl": { "type": "string" },
+        "caption": { "type": "string" },
+        "platforms": {
+          "type": "object",
+          "properties": {
+            "ig": { "type": "boolean" },
+            "yt": { "type": "boolean" }
+          }
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "processing", "success", "error"]
+        },
+        "igAuth": { "type": "object", "description": "Stored encrypted/serialized or as is for prototype" },
+        "ytAuth": { "type": "object", "description": "Stored encrypted/serialized or as is for prototype" },
+        "scheduledTime": { "type": "number", "description": "Unix timestamp in ms" },
+        "createdAt": { "type": "number", "description": "Unix timestamp in ms" },
+        "errorLog": { "type": "string" }
+      },
+      "required": ["userId", "videoUrl", "status", "scheduledTime"]
+    }
+  },
+  "firestore": {
+    "/scheduled_posts/{postId}": {
+      "schema": { "$ref": "#/entities/ScheduledPost" },
+      "description": "Queue and history of scheduled posts"
+    }
+  }
+}

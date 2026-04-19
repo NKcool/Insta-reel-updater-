@@ -1,0 +1,6 @@
+{
+  "name": "Remix: InstaRe-Share",
+  "description": "Automatically download and re-upload Instagram videos shared to this app.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
