@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { v4 as uuidv4 } from 'uuid';
 import { collection, query, where, getDocs, addDoc, updateDoc, doc, Timestamp, orderBy, limit, deleteDoc } from 'firebase/firestore';
@@ -11,7 +11,7 @@ import {
 
 interface AuthData { accessToken: string; igUserId: string; }
 interface YouTubeAuthData { access_token: string; refresh_token?: string; }
-interface QueueItem { id: string; scheduledTime: number; status: string; videoUrl: string; platforms: {ig: boolean, yt: boolean}; caption: string; firstComment?: string; errorLog?: string; igAuth?: AuthData; ytAuth?: YouTubeAuthData; }
+interface QueueItem { id: string; scheduledTime: number; createdAt: number; status: string; videoUrl: string; platforms: {ig: boolean, yt: boolean}; caption: string; firstComment?: string; errorLog?: string; igAuth?: AuthData; ytAuth?: YouTubeAuthData; }
 
 export default function App() {
   const [userId, setUserId] = useState<string>('');
@@ -152,6 +152,50 @@ export default function App() {
     }
   };
 
+  const QueueItemCard: React.FC<{ post: QueueItem }> = ({ post }) => (
+    <div key={post.id} className="bg-zinc-900/60 backdrop-blur-xl hover:bg-zinc-900/80 transition-colors border border-white/5 rounded-[24px] p-5 flex flex-col gap-4 shadow-xl">
+      <div className="flex justify-between items-start">
+        <div className="flex gap-2 bg-zinc-950/80 backdrop-blur-sm px-3 py-1.5 rounded-full border border-white/5 shadow-inner">
+          {post.platforms?.ig && <Instagram className="w-4 h-4 text-pink-400" />}
+          {post.platforms?.yt && <PlaySquare className="w-4 h-4 text-red-400" />}
+        </div>
+        <div className="flex gap-2">
+          <span className={`text-[10px] font-bold uppercase tracking-wider px-3 py-1.5 rounded-lg font-mono ${
+            post.status === 'success' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-inner shadow-emerald-900/20' :
+            post.status === 'processing' ? 'bg-violet-500/10 text-violet-400 animate-pulse border border-violet-500/20 shadow-inner' :
+            post.status === 'error' ? 'bg-red-500/10 text-red-400 border border-red-500/20 shadow-inner' :
+            'bg-zinc-800 text-zinc-400 border border-white/5 shadow-inner'
+          }`}>
+            {post.status}
+          </span>
+          <button 
+            onClick={(e) => handleDeleteQueueItem(post.id, e)}
+            className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 px-2 py-1.5 rounded-lg transition-colors flex items-center justify-center"
+            title="Delete Item"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+      
+      <div className="bg-zinc-950/50 rounded-2xl p-4 border border-white/5">
+        <p className="text-sm text-zinc-300 line-clamp-3 leading-relaxed">{post.caption}</p>
+      </div>
+
+      <div className="flex flex-col gap-2 pt-1 border-t border-white/5 mt-1 pt-3">
+        <span className="text-[11px] text-zinc-500 font-medium font-mono uppercase tracking-widest flex items-center justify-between">
+          <span>{post.status === 'success' ? 'Finished At' : post.status === 'error' ? 'Attempted At' : 'Scheduled'}</span>
+          <span className="text-zinc-300 font-semibold">{new Date(post.scheduledTime || post.createdAt).toLocaleString()}</span>
+        </span>
+        {post.errorLog && (
+          <div className="mt-2 bg-red-500/10 border border-red-500/20 rounded-xl p-3 text-[11px] font-mono text-red-300">
+            <strong>ERR:</strong> {post.errorLog}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
   const processPendingQueue = async () => {
     if (!userId || !localStorage.getItem('fb_uid')) return;
     try {
@@ -272,12 +316,49 @@ export default function App() {
           const error = await response.json();
           throw new Error(error.error || 'Processing failed');
         }
+        
+        // Save to history automatically
+        if (userId && localStorage.getItem('fb_uid')) {
+          await addDoc(collection(db, "scheduled_posts"), {
+             userId,
+             videoUrl: sharedUrl,
+             caption,
+             firstComment: firstComment || null,
+             platforms: selectedPlatforms,
+             status: 'success',
+             igAuth: auth || null,
+             ytAuth: ytAuth || null,
+             scheduledTime: Date.now(),
+             createdAt: Date.now()
+          });
+          fetchQueue();
+        }
+
         setStatus('success');
         addLog(`Successfully uploaded to destinations!`);
         setSharedUrl('');
+        setCaption('');
+        setActiveTab('queue');
         setTimeout(() => setStatus('idle'), 5000);
       } catch (err: any) {
-        setStatus('error'); alert(`Error: ${err.message}`);
+        if (userId && localStorage.getItem('fb_uid')) {
+          await addDoc(collection(db, "scheduled_posts"), {
+             userId,
+             videoUrl: sharedUrl,
+             caption,
+             firstComment: firstComment || null,
+             platforms: selectedPlatforms,
+             status: 'error',
+             errorLog: err.message,
+             igAuth: auth || null,
+             ytAuth: ytAuth || null,
+             scheduledTime: Date.now(),
+             createdAt: Date.now()
+          });
+          fetchQueue();
+        }
+        setStatus('error'); 
+        alert(`Error: ${err.message}`);
         addLog(`Upload Error: ${err.message}`);
       }
     }
@@ -531,63 +612,53 @@ export default function App() {
               </div>
             </motion.div>
           ) : (
-            <motion.div key="queue" initial={{opacity:0, y:10}} animate={{opacity:1, y:0}} exit={{opacity:0, y:-10}} className="space-y-4">
-              <div className="flex justify-between items-center px-4 pt-2">
-                <h2 className="text-lg font-semibold flex items-center gap-2"><History className="w-5 h-5 text-violet-400"/> Post Queue</h2>
-                <button onClick={fetchQueue} className="text-xs font-semibold text-violet-300 bg-violet-400/10 hover:bg-violet-400/20 px-4 py-1.5 rounded-full transition-colors font-mono tracking-wide">Refresh</button>
+            <motion.div key="queue" initial={{opacity:0, y:10}} animate={{opacity:1, y:0}} exit={{opacity:0, y:-10}} className="space-y-8 pb-10">
+              
+              {/* --- Pending Queue Section --- */}
+              <div className="space-y-4">
+                <div className="flex justify-between items-center px-4 pt-2">
+                  <h2 className="text-lg font-semibold flex items-center gap-2">
+                    <Clock className="w-5 h-5 text-violet-400"/> Pending Queue
+                  </h2>
+                  <button onClick={fetchQueue} className="text-xs font-semibold text-violet-300 bg-violet-400/10 hover:bg-violet-400/20 px-4 py-1.5 rounded-full transition-colors font-mono tracking-wide">
+                    Refresh
+                  </button>
+                </div>
+
+                {queue.filter(q => q.status === 'pending' || q.status === 'processing').length === 0 ? (
+                  <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-8 text-center text-zinc-500 shadow-inner font-mono text-sm">
+                    No scheduled posts.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {queue.filter(q => q.status === 'pending' || q.status === 'processing').map(post => (
+                      <QueueItemCard key={post.id} post={post} />
+                    ))}
+                  </div>
+                )}
               </div>
 
-              {queue.length === 0 ? (
-                <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-12 text-center text-zinc-500 shadow-inner font-mono text-sm">
-                  No scheduled or past posts.
+              {/* --- History Section --- */}
+              <div className="space-y-4 pt-6 border-t border-white/5">
+                <div className="flex justify-between items-center px-4">
+                  <h2 className="text-lg font-semibold flex items-center gap-2">
+                    <History className="w-5 h-5 text-zinc-400"/> Upload History
+                  </h2>
                 </div>
-              ) : (
-                <div className="space-y-3">
-                  {queue.map(post => (
-                    <div key={post.id} className="bg-zinc-900/60 backdrop-blur-xl hover:bg-zinc-900/80 transition-colors border border-white/5 rounded-[24px] p-5 flex flex-col gap-4 shadow-xl">
-                      <div className="flex justify-between items-start">
-                        <div className="flex gap-2 bg-zinc-950/80 backdrop-blur-sm px-3 py-1.5 rounded-full border border-white/5 shadow-inner">
-                          {post.platforms?.ig && <Instagram className="w-4 h-4 text-pink-400" />}
-                          {post.platforms?.yt && <PlaySquare className="w-4 h-4 text-red-400" />}
-                        </div>
-                        <div className="flex gap-2">
-                          <span className={`text-[10px] font-bold uppercase tracking-wider px-3 py-1.5 rounded-lg font-mono ${
-                            post.status === 'success' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-inner shadow-emerald-900/20' :
-                            post.status === 'processing' ? 'bg-violet-500/10 text-violet-400 animate-pulse border border-violet-500/20 shadow-inner' :
-                            post.status === 'error' ? 'bg-red-500/10 text-red-400 border border-red-500/20 shadow-inner' :
-                            'bg-zinc-800 text-zinc-400 border border-white/5 shadow-inner'
-                          }`}>
-                            {post.status}
-                          </span>
-                          <button 
-                            onClick={(e) => handleDeleteQueueItem(post.id, e)}
-                            className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 px-2 py-1.5 rounded-lg transition-colors flex items-center justify-center"
-                            title="Delete Item"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                      
-                      <div className="bg-zinc-950/50 rounded-2xl p-4 border border-white/5">
-                        <p className="text-sm text-zinc-300 line-clamp-3 leading-relaxed">{post.caption}</p>
-                      </div>
 
-                      <div className="flex flex-col gap-2 pt-1 border-t border-white/5 mt-1 pt-3">
-                        <span className="text-[11px] text-zinc-500 font-medium font-mono uppercase tracking-widest flex items-center justify-between">
-                          {post.status === 'success' ? 'Finished At' : 'Scheduled'}
-                          <span className="text-zinc-300 font-semibold">{new Date(post.scheduledTime).toLocaleString()}</span>
-                        </span>
-                        {post.errorLog && (
-                          <div className="mt-2 bg-red-500/10 border border-red-500/20 rounded-xl p-3 text-[11px] font-mono text-red-300">
-                            <strong>ERR_TRACE:</strong> {post.errorLog}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
+                {queue.filter(q => q.status === 'success' || q.status === 'error').length === 0 ? (
+                  <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-8 text-center text-zinc-500 shadow-inner font-mono text-sm">
+                    No past uploads.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {queue.filter(q => q.status === 'success' || q.status === 'error').map(post => (
+                      <QueueItemCard key={post.id} post={post} />
+                    ))}
+                  </div>
+                )}
+              </div>
+
             </motion.div>
           )}
         </AnimatePresence>
