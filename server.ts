@@ -13,6 +13,7 @@ import { GoogleGenAI } from '@google/genai';
 import admin from 'firebase-admin';
 import { getFirestore } from 'firebase-admin/firestore';
 import cron from 'node-cron';
+import { chromium } from 'playwright';
 
 dotenv.config();
 
@@ -353,36 +354,95 @@ async function startServer() {
     const { videoUrl } = req.body;
     try {
       let caption = "Write your caption here...";
-      // Try to fetch the page to extract open graph tags
+      
+      // Try Playwright First
       try {
-        const response = await axios.get(videoUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
-          },
-          timeout: 5000
+        console.log('[Playwright] Attempting to extract from', videoUrl);
+        const browser = await chromium.launch({
+          headless: true,
+          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
         });
+        const context = await browser.newContext({
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        });
+        const page = await context.newPage();
         
-        // Simple regex to find title or description
-        const titleMatch = response.data.match(/<title>(.*?)<\/title>/i);
-        const ogDescMatch = response.data.match(/<meta\s+property="og:description"\s+content="([^"]*)"/i);
-        const fbDescMatch = response.data.match(/<meta\s+property="twitter:title"\s+content="([^"]*)"/i);
+        await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
         
-        if (ogDescMatch && ogDescMatch[1]) {
-          caption = ogDescMatch[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'");
-        } else if (fbDescMatch && fbDescMatch[1]) {
-          caption = fbDescMatch[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'");
-        } else if (titleMatch && titleMatch[1]) {
-          // Clean up standard garbage on typical titles
-          const title = titleMatch[1].replace(/instagram|tiktok/gi, '').trim();
-          if (title.length > 5) caption = title;
+        // Wait a bit for JS to render the caption
+        await page.waitForTimeout(2000);
+
+        // For Instagram
+        if (videoUrl.includes('instagram.com')) {
+           const ogContent = await page.evaluate(() => {
+             const og = document.querySelector('meta[property="og:title"]');
+             return og ? og.getAttribute('content') : null;
+           });
+           
+           if (ogContent) {
+             caption = ogContent.split(': "').pop()?.replace(/"$/, '').trim() || ogContent;
+           } else {
+             const h1Text = await page.evaluate(() => {
+               const h1 = document.querySelector('h1');
+               return h1 ? h1.innerText : null;
+             });
+             if (h1Text) caption = h1Text;
+           }
+        } 
+        // For YouTube
+        else if (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be')) {
+           const ytDesc = await page.evaluate(() => {
+             const desc = document.querySelector('meta[name="description"]');
+             return desc ? desc.getAttribute('content') : null;
+           });
+           if (ytDesc) caption = ytDesc;
+        } 
+        
+        // Generic Fallback
+        if (caption === "Write your caption here..." || !caption) {
+           const genericDesc = await page.evaluate(() => {
+             const meta = document.querySelector('meta[property="og:description"]') || document.querySelector('meta[name="description"]');
+             return meta ? meta.getAttribute('content') : null;
+           });
+           if (genericDesc) caption = genericDesc;
         }
 
-      } catch (e) {
-        console.error('Extraction failed natively, returning placeholder');
+        await browser.close();
+        console.log('[Playwright] Extraction complete!');
+      } catch (pwError: any) {
+        console.error('[Playwright] Extraction failed, falling back to basic axios:', pwError.message);
+        
+        // Try to fetch the page to extract open graph tags
+        try {
+          const response = await axios.get(videoUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
+            },
+            timeout: 5000
+          });
+          
+          // Simple regex to find title or description
+          const titleMatch = response.data.match(/<title>(.*?)<\/title>/i);
+          const ogDescMatch = response.data.match(/<meta\s+property="og:description"\s+content="([^"]*)"/i);
+          const fbDescMatch = response.data.match(/<meta\s+property="twitter:title"\s+content="([^"]*)"/i);
+          
+          if (ogDescMatch && ogDescMatch[1]) {
+            caption = ogDescMatch[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+          } else if (fbDescMatch && fbDescMatch[1]) {
+            caption = fbDescMatch[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+          } else if (titleMatch && titleMatch[1]) {
+            // Clean up standard garbage on typical titles
+            const title = titleMatch[1].replace(/instagram|tiktok/gi, '').trim();
+            if (title.length > 5) caption = title;
+          }
+
+        } catch (e) {
+          console.error('Extraction failed natively, returning placeholder');
+        }
       }
 
       res.json({
-        caption: caption === "Write your caption here..." ? "" : caption,
+        caption: (caption === "Write your caption here..." || !caption) ? "" : caption,
         firstComment: "",
         recommendedDelayHours: 0,
         timingReasoning: "Manual posting"
