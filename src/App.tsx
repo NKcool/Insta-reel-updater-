@@ -6,7 +6,7 @@ import { db, loginWithFirebase } from './lib/firebase';
 import { 
   Instagram, Download, Upload, Share2, CheckCircle2, 
   AlertCircle, Loader2, Settings, Smartphone, Info,
-  Sparkles, CalendarClock, History, PlaySquare, Clock, Trash2
+  Sparkles, CalendarClock, History, PlaySquare, Clock, Trash2, LogOut
 } from 'lucide-react';
 
 interface AuthData { accessToken: string; igUserId: string; }
@@ -26,7 +26,17 @@ export default function App() {
   const [selectedPlatforms, setSelectedPlatforms] = useState<{ig: boolean; yt: boolean}>({ig: true, yt: true});
   const [activeTab, setActiveTab] = useState<'create' | 'queue'>('create');
   const [queue, setQueue] = useState<QueueItem[]>([]);
-  const [scheduleDelay, setScheduleDelay] = useState<number>(0);
+  const [isScheduled, setIsScheduled] = useState<boolean>(false);
+  
+  const getMinDate = () => {
+    const now = new Date();
+    // Round up to nearest 5 minutes
+    const ms = 1000 * 60 * 5;
+    const rounded = new Date(Math.ceil(now.getTime() / ms) * ms);
+    return new Date(rounded.getTime() - (rounded.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
+  };
+  
+  const [scheduleDateTime, setScheduleDateTime] = useState<string>(getMinDate());
   const [log, setLog] = useState<string[]>([]);
 
   const addLog = (msg: string) => setLog(prev => [...prev, `${new Date().toLocaleTimeString()}: ${msg}`]);
@@ -268,11 +278,16 @@ export default function App() {
     if (!selectedPlatforms.ig && !selectedPlatforms.yt) return alert('Select a platform');
     if (!sharedUrl) return alert('No URL to process');
 
-    if (scheduleDelay > 0) {
+    if (isScheduled) {
       if (!localStorage.getItem('fb_uid')) return alert('Please Connect Database before scheduling posts.');
+      
+      const targetTime = new Date(scheduleDateTime).getTime();
+      if (isNaN(targetTime) || targetTime <= Date.now()) {
+        return alert('Please select a valid future date and time for scheduling.');
+      }
+
       setStatus('processing');
       try {
-        const scheduledTime = Date.now() + (scheduleDelay * 60 * 60 * 1000);
         await addDoc(collection(db, "scheduled_posts"), {
           userId,
           videoUrl: sharedUrl,
@@ -282,15 +297,15 @@ export default function App() {
           status: 'pending',
           igAuth: auth || null,
           ytAuth: ytAuth || null,
-          scheduledTime: scheduledTime,
+          scheduledTime: targetTime,
           createdAt: Date.now()
         });
         
         setStatus('success');
-        setScheduleDelay(0);
+        setIsScheduled(false);
         setSharedUrl('');
         fetchQueue();
-        addLog(`Post scheduled successfully for ${new Date(scheduledTime).toLocaleTimeString()}`);
+        addLog(`Post scheduled successfully for ${new Date(targetTime).toLocaleString()}`);
         setTimeout(() => setStatus('idle'), 3000);
         setActiveTab('queue');
       } catch (err: any) {
@@ -375,6 +390,21 @@ export default function App() {
     }
   };
 
+  const handleResetConnections = () => {
+    // Clear React states
+    setUserId('');
+    setAuth(null);
+    setYtAuth(null);
+    setQueue([]);
+    
+    // Clear local storage
+    localStorage.removeItem('fb_uid');
+    localStorage.removeItem('insta_auth');
+    localStorage.removeItem('yt_auth');
+    
+    addLog('Successfully disconnected all accounts and databases.');
+  };
+
   return (
     <div className="min-h-screen relative font-sans text-white selection:bg-violet-500/30">
       {/* Background Orbs */}
@@ -391,7 +421,7 @@ export default function App() {
             </div>
             <h1 className="text-xl font-bold tracking-tight bg-gradient-to-r from-white to-white/60 bg-clip-text text-transparent">InstaRe<span className="text-violet-500">.</span></h1>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             {!userId ? (
               <button onClick={handleFirebaseLogin} className="bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border border-white/5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-2">
                 Connect DB
@@ -556,22 +586,43 @@ export default function App() {
 
                 <div className="pt-6 border-t border-white/5 space-y-4">
                   <div className="flex flex-col gap-2">
-                    <div className="flex items-center justify-between bg-zinc-950/80 border border-white/5 rounded-2xl p-2.5 pl-5 shadow-inner">
-                      <span className="text-sm font-medium text-zinc-300 flex items-center gap-2 font-mono"><Clock className="w-4 h-4 text-violet-400"/> Timing</span>
-                      <select 
-                        value={scheduleDelay}
-                        onChange={(e) => setScheduleDelay(Number(e.target.value))}
-                        className="bg-zinc-800 border-none text-white font-medium text-sm rounded-xl px-4 py-2 focus:ring-0 cursor-pointer text-right outline-none appearance-none hover:bg-zinc-700 transition-colors"
-                      >
-                        <option value={0}>Post Immediately</option>
-                        <option value={1}>In 1 Hour</option>
-                        <option value={3}>In 3 Hours</option>
-                        <option value={12}>In 12 Hours</option>
-                        <option value={24}>Tomorrow</option>
-                      </select>
+                    <div className="flex flex-col gap-2 bg-zinc-950/80 border border-white/5 rounded-2xl p-4 shadow-inner">
+                      <div className="flex items-center justify-between">
+                         <span className="text-sm font-medium text-zinc-300 flex items-center gap-2 font-mono"><Clock className="w-4 h-4 text-violet-400"/> Timing</span>
+                         <select 
+                           value={isScheduled ? 'later' : 'now'}
+                           onChange={(e) => setIsScheduled(e.target.value === 'later')}
+                           className="bg-zinc-800 border-none text-white font-medium text-sm rounded-xl px-4 py-2 focus:ring-0 cursor-pointer outline-none hover:bg-zinc-700 transition-colors"
+                         >
+                           <option value="now">Post Immediately</option>
+                           <option value="later">Schedule for Later...</option>
+                         </select>
+                      </div>
+
+                      <AnimatePresence>
+                         {isScheduled && (
+                           <motion.div 
+                             initial={{ opacity: 0, height: 0 }}
+                             animate={{ opacity: 1, height: 'auto' }}
+                             exit={{ opacity: 0, height: 0 }}
+                             className="overflow-hidden mt-2 pt-2 border-t border-white/5"
+                           >
+                             <div className="flex flex-col gap-1.5">
+                               <label className="text-xs text-zinc-500 font-mono tracking-wide">Select Date & Time</label>
+                               <input 
+                                 type="datetime-local" 
+                                 value={scheduleDateTime}
+                                 min={getMinDate()}
+                                 onChange={(e) => setScheduleDateTime(e.target.value)}
+                                 className="bg-zinc-900 border border-white/10 rounded-xl px-4 py-2.5 text-white text-sm focus:outline-none focus:border-violet-500/50 w-full font-sans cursor-text dark:[color-scheme:dark]"
+                               />
+                             </div>
+                           </motion.div>
+                         )}
+                      </AnimatePresence>
                     </div>
                     <AnimatePresence>
-                      {timingSuggestion && scheduleDelay > 0 && (
+                      {timingSuggestion && isScheduled && (
                         <motion.div 
                           initial={{ opacity: 0, y: -10, height: 0 }} 
                           animate={{ opacity: 1, y: 0, height: 'auto' }} 
@@ -593,19 +644,19 @@ export default function App() {
                     className={`relative w-full py-4 rounded-2xl font-bold text-base flex items-center justify-center gap-2 transition-all group overflow-hidden mt-2 ${
                       status === 'processing' 
                         ? 'bg-zinc-900 text-zinc-500 cursor-not-allowed border border-white/5' 
-                        : scheduleDelay > 0 
+                        : isScheduled 
                           ? 'bg-gradient-to-r from-violet-600 to-indigo-600 text-white shadow-[0_0_30px_rgba(139,92,246,0.3)] border border-violet-500/50'
                           : 'bg-zinc-100 text-black shadow-xl shadow-white/10 hover:bg-white'
                     }`}
                   >
                     {/* Glossy Overlay inside the button for schedule mode */}
-                    {scheduleDelay > 0 && status !== 'processing' && (
+                    {isScheduled && status !== 'processing' && (
                        <div className="absolute inset-0 bg-white/20 translate-y-[-100%] group-hover:translate-y-[100%] transition-transform duration-700 ease-in-out" />
                     )}
                     
                     {status === 'processing' ? <><Loader2 className="w-5 h-5 animate-spin" /> Processing...</> : 
                      status === 'success' ? <><CheckCircle2 className="w-5 h-5" /> Done!</> :
-                     scheduleDelay > 0 ? <><CalendarClock className="w-5 h-5" /> Queue Post</> : 
+                     isScheduled ? <><CalendarClock className="w-5 h-5" /> Queue Post</> : 
                      <><Upload className="w-5 h-5" /> Post Now</>}
                   </motion.button>
                 </div>
@@ -651,7 +702,7 @@ export default function App() {
                     No past uploads.
                   </div>
                 ) : (
-                  <div className="space-y-3">
+                  <div className="space-y-3 max-h-[540px] overflow-y-auto pr-2">
                     {queue.filter(q => q.status === 'success' || q.status === 'error').map(post => (
                       <QueueItemCard key={post.id} post={post} />
                     ))}
@@ -682,6 +733,17 @@ export default function App() {
           </div>
         </section>
 
+        {/* Footer Controls */}
+        {(userId || auth || ytAuth) && (
+          <div className="pt-12 pb-6 flex justify-center">
+            <button 
+              onClick={handleResetConnections}
+              className="bg-zinc-900/80 hover:bg-red-500/10 text-zinc-400 hover:text-red-400 border border-white/5 hover:border-red-500/20 px-5 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2.5 shadow-sm active:scale-95"
+            >
+              <LogOut className="w-4 h-4" /> Disconnect All Accounts
+            </button>
+          </div>
+        )}
       </main>
     </div>
   );
