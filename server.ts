@@ -14,6 +14,7 @@ import admin from 'firebase-admin';
 import { getFirestore } from 'firebase-admin/firestore';
 import cron from 'node-cron';
 import { chromium } from 'playwright';
+import yts from 'yt-search';
 
 dotenv.config();
 
@@ -41,34 +42,42 @@ try {
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 
-import { igdl } from 'btch-downloader';
+import { igdl, youtube as btchYoutube } from 'btch-downloader';
 
-// Helper to extract direct video URL from a standard Instagram link
-async function extractVideoUrl(igLink: string): Promise<string> {
+// Helper to extract direct video URL from a standard Instagram link or YouTube link
+async function extractVideoUrl(videoLink: string): Promise<string> {
   // If it's already a direct link, return it
-  if (igLink.includes('.mp4') || igLink.includes('video_url')) return igLink;
+  if (videoLink.includes('.mp4') || videoLink.includes('video_url')) return videoLink;
 
-  console.log(`[Extraction] Attempting to extract video from: ${igLink}`);
+  console.log(`[Extraction] Attempting to extract video from: ${videoLink}`);
 
   try {
-    const data = await igdl(igLink);
-    
-    if (data && data.status && Array.isArray(data.result)) {
-      // Find the first valid URL
-      const validMedia = data.result.find((item: any) => item.url && typeof item.url === 'string');
-      
-      if (validMedia && validMedia.url) {
-        console.log(`[Extraction] Success! Found video URL.`);
-        return validMedia.url;
+    if (videoLink.includes('youtube.com') || videoLink.includes('youtu.be')) {
+      const data = await btchYoutube(videoLink);
+      if (data && data.status && data.mp4) {
+        console.log(`[Extraction] Success! Found YouTube video URL.`);
+        return data.mp4;
       }
+      console.log('[Extraction] btch-downloader returned unexpected YT format:', JSON.stringify(data).substring(0, 200));
+    } else {
+      const data = await igdl(videoLink);
+      
+      if (data && data.status && Array.isArray(data.result)) {
+        // Find the first valid URL
+        const validMedia = data.result.find((item: any) => item.url && typeof item.url === 'string');
+        
+        if (validMedia && validMedia.url) {
+          console.log(`[Extraction] Success! Found IG video URL.`);
+          return validMedia.url;
+        }
+      }
+      console.log('[Extraction] btch-downloader returned unexpected IG format:', JSON.stringify(data).substring(0, 200));
     }
-    
-    console.log('[Extraction] btch-downloader returned unexpected format:', JSON.stringify(data).substring(0, 200));
   } catch (e: any) {
     console.error('[Extraction] btch-downloader failed:', e.message);
   }
 
-  throw new Error('Could not extract video from this link. The post may be private, deleted, or Instagram is temporarily blocking extraction. Please try sharing the reel again in a moment, or ensure the post is public.');
+  throw new Error('Could not extract video from this link. The post may be private, deleted, or unsupported. Please try sharing a public IG Reel or YouTube Short again in a moment.');
 }
 
 async function startServer() {
@@ -104,6 +113,26 @@ async function startServer() {
     const sharedUrl = (text || url || '').toString();
     // Redirect to frontend with the shared URL as a param
     res.redirect(`/?sharedUrl=${encodeURIComponent(sharedUrl)}`);
+  });
+
+  // Trending Videos (YouTube Shorts search)
+  app.get('/api/trending', async (req, res) => {
+    const topic = req.query.topic || 'viral';
+    try {
+      const searchResult = await yts(`${topic} #shorts`);
+      const videos = searchResult.videos.slice(0, 10).map(v => ({
+        title: v.title,
+        url: v.url,
+        thumbnail: v.thumbnail,
+        views: v.views,
+        author: v.author.name,
+        duration: v.duration.timestamp
+      }));
+      res.json({ videos });
+    } catch (e: any) {
+      console.error('Trending fetch error:', e);
+      res.status(500).json({ error: 'Failed to fetch trending videos' });
+    }
   });
 
   // --- YouTube OAuth ---
@@ -701,6 +730,61 @@ async function startServer() {
       res.status(404).send('Not found');
     }
   });
+
+  // --- Cron Scheduler ---
+  if (firebaseDb) {
+    cron.schedule('* * * * *', async () => {
+      // Run every minute
+      console.log('[Cron] Checking for scheduled posts...');
+      try {
+        const now = Date.now();
+        const queuedQuery = await firebaseDb!.collection('scheduled_posts')
+          .where('status', '==', 'pending')
+          .where('scheduledTime', '<=', now)
+          .get();
+
+        if (queuedQuery.empty) {
+          return;
+        }
+
+        console.log(`[Cron] Found ${queuedQuery.size} scheduled post(s) ready to process!`);
+
+        for (const doc of queuedQuery.docs) {
+          const postData = doc.data();
+          const docRef = doc.ref;
+
+          console.log(`[Cron] Executing POST for queue item: ${doc.id}`);
+          // Mark as processing
+          await docRef.update({ status: 'processing' });
+
+          try {
+            // Internally call our own processing endpoint
+            await axios.post(`http://localhost:${PORT}/api/process`, {
+              videoUrl: postData.videoUrl,
+              igAuth: postData.igAuth,
+              ytAuth: postData.ytAuth,
+              caption: postData.caption,
+              firstComment: postData.firstComment,
+              platforms: postData.platforms
+            });
+
+            await docRef.update({ status: 'success' });
+            console.log(`[Cron] Item ${doc.id} COMPLETED.`);
+          } catch (error: any) {
+             const errorMsg = error.response?.data?.error || error.message || 'Unknown processing error';
+             console.error(`[Cron] Item ${doc.id} FAILED:`, errorMsg);
+             await docRef.update({ 
+               status: 'error', 
+               errorLog: errorMsg 
+             });
+          }
+        }
+      } catch (err: any) {
+        console.error('[Cron] Failed query to find scheduled posts:', err.message);
+      }
+    });
+    console.log('Background cron scheduler initialized!');
+  }
 
   // --- Vite Middleware ---
   if (process.env.NODE_ENV !== 'production') {

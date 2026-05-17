@@ -24,9 +24,15 @@ export default function App() {
   const [firstComment, setFirstComment] = useState<string>('');
   const [timingSuggestion, setTimingSuggestion] = useState<string>('');
   const [selectedPlatforms, setSelectedPlatforms] = useState<{ig: boolean; yt: boolean}>({ig: true, yt: true});
-  const [activeTab, setActiveTab] = useState<'create' | 'queue'>('create');
+  const [activeTab, setActiveTab] = useState<'create' | 'queue' | 'discover'>('discover');
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [isScheduled, setIsScheduled] = useState<boolean>(false);
+  
+  // Discover State
+  const [discoverTopic, setDiscoverTopic] = useState<string>('');
+  const [trendingVideos, setTrendingVideos] = useState<any[]>([]);
+  const [isDiscovering, setIsDiscovering] = useState<boolean>(false);
+  const [hasSearched, setHasSearched] = useState<boolean>(false);
   
   const getMinDate = () => {
     const now = new Date();
@@ -131,8 +137,7 @@ export default function App() {
     if (userId) {
       fetchQueue();
       const interval = setInterval(fetchQueue, 15000); // Poll every 15s when on queue tab
-      const processInterval = setInterval(processPendingQueue, 30000); // Check for ready posts every 30s
-      return () => { clearInterval(interval); clearInterval(processInterval); };
+      return () => { clearInterval(interval); };
     }
   }, [userId]);
 
@@ -205,56 +210,6 @@ export default function App() {
       </div>
     </div>
   );
-
-  const processPendingQueue = async () => {
-    if (!userId || !localStorage.getItem('fb_uid')) return;
-    try {
-      const now = Date.now();
-      const q = query(
-        collection(db, "scheduled_posts"), 
-        where("userId", "==", userId),
-        where("status", "==", "pending")
-      );
-      const snap = await getDocs(q);
-      
-      const readyPosts = snap.docs.map(d => ({id: d.id, ...d.data()}) as QueueItem)
-        .filter(p => p.scheduledTime <= now);
-        
-      if (readyPosts.length > 0) {
-        addLog(`Started background processing for ${readyPosts.length} queued posts.`);
-      }
-        
-      for (const post of readyPosts) {
-        const postRef = doc(db, "scheduled_posts", post.id);
-        await updateDoc(postRef, { status: 'processing' });
-        
-        try {
-          const processRes = await fetch('/api/process', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              videoUrl: post.videoUrl, caption: post.caption,
-              firstComment: post.firstComment || null,
-              platforms: post.platforms,
-              igAuth: post.igAuth, ytAuth: post.ytAuth
-            })
-          });
-          if (!processRes.ok) {
-            const errData = await processRes.json();
-            throw new Error(errData.error || 'Failed');
-          }
-          await updateDoc(postRef, { status: 'success' });
-          addLog(`Queue Item ${post.id.substring(0, 4)} processed successfully!`);
-        } catch (e: any) {
-          await updateDoc(postRef, { status: 'error', errorLog: e.message });
-          addLog(`Queue Item ${post.id.substring(0, 4)} failed: ${e.message}`);
-        }
-      }
-      if (readyPosts.length > 0) fetchQueue();
-    } catch (e) {
-      console.error("Queue process error:", e);
-    }
-  };
 
   const handleLogin = async () => {
     try {
@@ -405,6 +360,32 @@ export default function App() {
     addLog('Successfully disconnected all accounts and databases.');
   };
 
+  const handleDiscoverAction = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!discoverTopic.trim()) return;
+    setIsDiscovering(true);
+    setHasSearched(true);
+    addLog(`Searching trending shorts for topic: ${discoverTopic}...`);
+    try {
+      const res = await fetch(`/api/trending?topic=${encodeURIComponent(discoverTopic)}`);
+      if (!res.ok) throw new Error('API failed');
+      const data = await res.json();
+      setTrendingVideos(data.videos || []);
+      addLog(`Found ${data.videos?.length || 0} trending videos!`);
+    } catch (err) {
+      addLog('Failed to fetch trending videos.');
+    } finally {
+      setIsDiscovering(false);
+    }
+  };
+
+  const useTrendingVideo = (video: any) => {
+    setSharedUrl(video.url);
+    setCaption(`${video.title}\n\nVia ${video.author}`);
+    setActiveTab('create');
+    addLog(`Imported trending video: ${video.title}`);
+  };
+
   return (
     <div className="min-h-screen relative font-sans text-white selection:bg-violet-500/30">
       {/* Background Orbs */}
@@ -445,7 +426,13 @@ export default function App() {
 
       <main className="max-w-2xl mx-auto p-4 md:p-6 space-y-8 pb-24">
         {/* Navigation */}
-        <div className="flex p-1 bg-zinc-900/50 backdrop-blur-md border border-white/5 rounded-2xl w-full max-w-sm mx-auto shadow-inner">
+        <div className="flex p-1 bg-zinc-900/50 backdrop-blur-md border border-white/5 rounded-2xl w-full max-w-lg mx-auto shadow-inner">
+          <button 
+            onClick={() => setActiveTab('discover')}
+            className={`flex-1 py-2.5 text-sm font-medium rounded-xl transition-all ${activeTab==='discover' ? 'bg-zinc-800 text-white shadow-sm border border-white/10' : 'text-zinc-500 hover:text-zinc-300'}`}
+          >
+            Discover
+          </button>
           <button 
             onClick={() => setActiveTab('create')}
             className={`flex-1 py-2.5 text-sm font-medium rounded-xl transition-all ${activeTab==='create' ? 'bg-zinc-800 text-white shadow-sm border border-white/10' : 'text-zinc-500 hover:text-zinc-300'}`}
@@ -461,7 +448,80 @@ export default function App() {
         </div>
 
         <AnimatePresence mode="wait">
-          {activeTab === 'create' ? (
+          {activeTab === 'discover' ? (
+             <motion.div key="discover" initial={{opacity:0, y:10}} animate={{opacity:1, y:0}} exit={{opacity:0, y:-10}} className="space-y-6">
+                <div className="bg-zinc-900/40 backdrop-blur-3xl border border-white/10 rounded-[32px] p-6 space-y-6 shadow-2xl">
+                  <div className="flex flex-col gap-2">
+                    <h2 className="text-xl font-bold">Discover Trending Shorts</h2>
+                    <p className="text-sm text-zinc-400">Search for viral topics on YouTube Shorts to download and repurpose.</p>
+                  </div>
+                  
+                  <form onSubmit={handleDiscoverAction} className="flex gap-2">
+                    <input 
+                      type="text" 
+                      value={discoverTopic}
+                      onChange={(e) => setDiscoverTopic(e.target.value)}
+                      placeholder="e.g. funny cats, motivation, coding"
+                      className="flex-1 bg-zinc-950/80 border border-white/10 rounded-2xl px-5 py-4 focus:outline-none focus:border-violet-500/50 focus:ring-1 focus:ring-violet-500/50 transition-all text-sm font-medium"
+                    />
+                    <button 
+                      type="submit"
+                      disabled={isDiscovering || !discoverTopic.trim()}
+                      className="bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-white font-bold px-6 rounded-2xl disabled:opacity-50 disabled:grayscale transition-all flex items-center justify-center min-w-[120px]"
+                    >
+                      {isDiscovering ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Search'}
+                    </button>
+                  </form>
+                </div>
+                
+                {hasSearched && (
+                  <div className="space-y-4">
+                    {trendingVideos.length > 0 ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {trendingVideos.map((vid, idx) => (
+                           <div key={idx} className="bg-zinc-900/60 backdrop-blur-xl hover:bg-zinc-900/80 transition-colors border border-white/5 rounded-[24px] overflow-hidden flex flex-col shadow-xl">
+                             <div className="relative aspect-[9/16] w-full bg-zinc-950/50">
+                               <img src={vid.thumbnail} alt={vid.title} className="absolute w-full h-full object-cover opacity-80" />
+                               <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-zinc-950/40 to-transparent" />
+                               
+                               <div className="absolute top-3 left-3 bg-red-500 text-white text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded-md shadow-lg flex items-center gap-1">
+                                 <PlaySquare className="w-3 h-3" /> Shorts
+                               </div>
+                               
+                               <div className="absolute bottom-4 left-4 right-4">
+                                  <h3 className="font-semibold text-sm line-clamp-2 leading-tight drop-shadow-md mb-2 object-bottom">{vid.title}</h3>
+                                  <div className="flex items-center justify-between">
+                                    <div className="text-xs text-zinc-300 font-mono flex items-center gap-1">
+                                      {vid.views} views
+                                    </div>
+                                    <div className="text-xs text-zinc-400 truncate max-w-[100px] text-right font-medium">
+                                      {vid.author}
+                                    </div>
+                                  </div>
+                               </div>
+                             </div>
+                             <div className="p-3">
+                               <button 
+                                 onClick={() => useTrendingVideo(vid)}
+                                 className="w-full bg-white/10 hover:bg-white/20 border border-white/5 py-2.5 rounded-xl text-sm font-semibold transition-colors flex items-center justify-center gap-2 text-white"
+                               >
+                                 <Download className="w-4 h-4" /> Use this Video
+                               </button>
+                             </div>
+                           </div>
+                        ))}
+                      </div>
+                    ) : (
+                      !isDiscovering && (
+                         <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-8 text-center text-zinc-500 shadow-inner font-mono text-sm mt-4">
+                           No trending shorts found for this topic.
+                         </div>
+                      )
+                    )}
+                  </div>
+                )}
+             </motion.div>
+          ) : activeTab === 'create' ? (
             <motion.div key="create" initial={{opacity:0, y:10}} animate={{opacity:1, y:0}} exit={{opacity:0, y:-10}} className="space-y-6">
               
               <div className="bg-zinc-900/40 backdrop-blur-3xl border border-white/10 rounded-[32px] p-6 space-y-6 shadow-2xl">
