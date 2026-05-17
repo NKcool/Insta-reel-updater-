@@ -137,11 +137,26 @@ async function startServer() {
 
   // --- YouTube OAuth ---
   
-  function getYoutubeOauth2Client() {
+  function getYoutubeOauth2Client(req: express.Request) {
     const clientId = process.env.YOUTUBE_CLIENT_ID;
     const clientSecret = process.env.YOUTUBE_CLIENT_SECRET;
-    const redirectUri = `${process.env.APP_URL}/api/auth/youtube/callback`;
-    return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
+    
+    // Derive base URL: Priority 1: APP_URL env, Priority 2: Request headers
+    let baseUrl = process.env.APP_URL;
+    if (!baseUrl) {
+      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+      const host = req.headers['x-forwarded-host'] || req.get('host');
+      baseUrl = `${protocol}://${host}`;
+    }
+    baseUrl = baseUrl.replace(/\/$/, ''); // Remove trailing slash
+
+    const redirectUri = `${baseUrl}/api/auth/youtube/callback`;
+    console.log(`[YouTube OAuth] Using Redirect URI: ${redirectUri}`);
+    
+    return {
+      client: new google.auth.OAuth2(clientId, clientSecret, redirectUri),
+      redirectUri
+    };
   }
 
   app.get('/api/auth/youtube/url', (req, res) => {
@@ -150,17 +165,17 @@ async function startServer() {
       return res.status(400).json({ error: 'YouTube Client ID not configured in Secrets' });
     }
 
-    const oauth2Client = getYoutubeOauth2Client();
+    const { client: oauth2Client } = getYoutubeOauth2Client(req);
     const scopes = [
       'https://www.googleapis.com/auth/youtube.upload',
-      'https://www.googleapis.com/auth/youtube.readonly', // helpful to test token
-      'https://www.googleapis.com/auth/youtube.force-ssl' // required to post comments
+      'https://www.googleapis.com/auth/youtube.readonly',
+      'https://www.googleapis.com/auth/youtube.force-ssl'
     ];
     
     const url = oauth2Client.generateAuthUrl({
-      access_type: 'offline', // gets refresh token
+      access_type: 'offline',
       scope: scopes,
-      prompt: 'consent' // forces re-consent to assure refresh token
+      prompt: 'consent'
     });
     
     res.json({ url });
@@ -173,7 +188,7 @@ async function startServer() {
     }
 
     try {
-      const oauth2Client = getYoutubeOauth2Client();
+      const { client: oauth2Client } = getYoutubeOauth2Client(req);
       const { tokens } = await oauth2Client.getToken(code as string);
       
       // Send token back to window opener
@@ -382,96 +397,117 @@ async function startServer() {
   app.post('/api/extract-metadata', async (req, res) => {
     const { videoUrl } = req.body;
     try {
-      let caption = "Write your caption here...";
+      let caption = "";
       
-      // Try Playwright First
-      try {
-        console.log('[Playwright] Attempting to extract from', videoUrl);
-        const browser = await chromium.launch({
-          headless: true,
-          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
-        });
-        const context = await browser.newContext({
-          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        });
-        const page = await context.newPage();
-        
-        await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        
-        // Wait a bit for JS to render the caption
-        await page.waitForTimeout(2000);
-
-        // For Instagram
-        if (videoUrl.includes('instagram.com')) {
-           const ogContent = await page.evaluate(() => {
-             const og = document.querySelector('meta[property="og:title"]');
-             return og ? og.getAttribute('content') : null;
-           });
-           
-           if (ogContent) {
-             caption = ogContent.split(': "').pop()?.replace(/"$/, '').trim() || ogContent;
-           } else {
-             const h1Text = await page.evaluate(() => {
-               const h1 = document.querySelector('h1');
-               return h1 ? h1.innerText : null;
-             });
-             if (h1Text) caption = h1Text;
-           }
-        } 
-        // For YouTube
-        else if (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be')) {
-           const ytDesc = await page.evaluate(() => {
-             const desc = document.querySelector('meta[name="description"]');
-             return desc ? desc.getAttribute('content') : null;
-           });
-           if (ytDesc) caption = ytDesc;
-        } 
-        
-        // Generic Fallback
-        if (caption === "Write your caption here..." || !caption) {
-           const genericDesc = await page.evaluate(() => {
-             const meta = document.querySelector('meta[property="og:description"]') || document.querySelector('meta[name="description"]');
-             return meta ? meta.getAttribute('content') : null;
-           });
-           if (genericDesc) caption = genericDesc;
-        }
-
-        await browser.close();
-        console.log('[Playwright] Extraction complete!');
-      } catch (pwError: any) {
-        console.error('[Playwright] Extraction failed, falling back to basic axios:', pwError.message);
-        
-        // Try to fetch the page to extract open graph tags
+      // 1. Check if it's YouTube - Use yt-search (very reliable)
+      if (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be')) {
         try {
-          const response = await axios.get(videoUrl, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
-            },
-            timeout: 5000
-          });
-          
-          // Simple regex to find title or description
-          const titleMatch = response.data.match(/<title>(.*?)<\/title>/i);
-          const ogDescMatch = response.data.match(/<meta\s+property="og:description"\s+content="([^"]*)"/i);
-          const fbDescMatch = response.data.match(/<meta\s+property="twitter:title"\s+content="([^"]*)"/i);
-          
-          if (ogDescMatch && ogDescMatch[1]) {
-            caption = ogDescMatch[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'");
-          } else if (fbDescMatch && fbDescMatch[1]) {
-            caption = fbDescMatch[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'");
-          } else if (titleMatch && titleMatch[1]) {
-            // Clean up standard garbage on typical titles
-            const title = titleMatch[1].replace(/instagram|tiktok/gi, '').trim();
-            if (title.length > 5) caption = title;
+          console.log('[Extraction] Using yt-search for YouTube metadata:', videoUrl);
+          // Extract video ID
+          const videoIdMatch = videoUrl.match(/(?:v=|\/shorts\/|\/embed\/|\/be\/)([a-zA-Z0-9_-]{11})/);
+          if (videoIdMatch && videoIdMatch[1]) {
+            const ytInfo = await yts({ videoId: videoIdMatch[1] });
+            if (ytInfo && ytInfo.description) {
+              caption = ytInfo.description;
+              // If description is empty, use title
+              if (!caption.trim()) caption = ytInfo.title;
+              console.log('[Extraction] YouTube success via yt-search');
+            }
           }
+        } catch (ytErr: any) {
+          console.error('[Extraction] yt-search failed:', ytErr.message);
+        }
+      }
 
-        } catch (e) {
-          console.error('Extraction failed natively, returning placeholder');
+      // 2. Fallback to Playwright if not handled or failed
+      if (!caption) {
+        try {
+          console.log('[Playwright] Attempting to extract from', videoUrl);
+          const browser = await chromium.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu']
+          });
+          const context = await browser.newContext({
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          });
+          const page = await context.newPage();
+          
+          await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          
+          // Wait a bit for JS to render the caption
+          await page.waitForTimeout(2000);
+  
+          // For Instagram
+          if (videoUrl.includes('instagram.com')) {
+             const ogContent = await page.evaluate(() => {
+               const og = document.querySelector('meta[property="og:title"]');
+               return og ? og.getAttribute('content') : null;
+             });
+             
+             if (ogContent) {
+               caption = ogContent.split(': "').pop()?.replace(/"$/, '').trim() || ogContent;
+             } else {
+               const h1Text = await page.evaluate(() => {
+                 const h1 = document.querySelector('h1');
+                 return h1 ? h1.innerText : null;
+               });
+               if (h1Text) caption = h1Text;
+             }
+          } 
+          // For YouTube (Fallback)
+          else if (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be')) {
+             const ytDesc = await page.evaluate(() => {
+               const desc = document.querySelector('meta[name="description"]');
+               return desc ? desc.getAttribute('content') : null;
+             });
+             if (ytDesc) caption = ytDesc;
+          } 
+          
+          // Generic Fallback
+          if (!caption) {
+             const genericDesc = await page.evaluate(() => {
+               const meta = document.querySelector('meta[property="og:description"]') || document.querySelector('meta[name="description"]');
+               return meta ? meta.getAttribute('content') : null;
+             });
+             if (genericDesc) caption = genericDesc;
+          }
+  
+          await browser.close();
+          console.log('[Playwright] Extraction complete!');
+        } catch (pwError: any) {
+          console.error('[Playwright] Extraction failed, falling back to basic axios:', pwError.message);
+          
+          // Try to fetch the page to extract open graph tags
+          try {
+            const response = await axios.get(videoUrl, {
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
+              },
+              timeout: 5000
+            });
+            
+            // Simple regex to find title or description
+            const titleMatch = response.data.match(/<title>(.*?)<\/title>/i);
+            const ogDescMatch = response.data.match(/<meta\s+property="og:description"\s+content="([^"]*)"/i);
+            const fbDescMatch = response.data.match(/<meta\s+property="twitter:title"\s+content="([^"]*)"/i);
+            
+            if (ogDescMatch && ogDescMatch[1]) {
+              caption = ogDescMatch[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+            } else if (fbDescMatch && fbDescMatch[1]) {
+              caption = fbDescMatch[1].replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+            } else if (titleMatch && titleMatch[1]) {
+              // Clean up standard garbage on typical titles
+              const title = titleMatch[1].replace(/instagram|tiktok/gi, '').trim();
+              if (title.length > 5) caption = title;
+            }
+          } catch (e) {
+            console.error('Extraction failed natively');
+          }
         }
       }
 
       res.json({
-        caption: (caption === "Write your caption here..." || !caption) ? "" : caption,
+        caption: caption || "",
         firstComment: "",
         recommendedDelayHours: 0,
         timingReasoning: "Manual posting"
