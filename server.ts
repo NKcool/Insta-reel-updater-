@@ -18,13 +18,21 @@ import yts from 'yt-search';
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+let appFilename = '';
+let appDirname = '';
+
+try {
+  appFilename = fileURLToPath(import.meta.url);
+  appDirname = path.dirname(appFilename);
+} catch (e) {
+  appFilename = typeof __filename !== 'undefined' ? __filename : '';
+  appDirname = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
+}
 
 // Initialize Firebase Admin correctly with Project ID and Database ID
 let firebaseDb: admin.firestore.Firestore | null = null;
 try {
-  const firebaseConfigPath = path.join(__dirname, 'firebase-applet-config.json');
+  const firebaseConfigPath = path.join(appDirname, 'firebase-applet-config.json');
   if (fs.existsSync(firebaseConfigPath)) {
     const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, 'utf8'));
     
@@ -111,7 +119,7 @@ async function startServer() {
   }));
 
   // Temporary storage for downloaded videos
-  const tempDir = path.join(__dirname, 'temp');
+  const tempDir = path.join(appDirname, 'temp');
   if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir);
   }
