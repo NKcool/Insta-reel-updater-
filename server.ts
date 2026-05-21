@@ -27,9 +27,23 @@ try {
   const firebaseConfigPath = path.join(__dirname, 'firebase-applet-config.json');
   if (fs.existsSync(firebaseConfigPath)) {
     const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, 'utf8'));
-    admin.initializeApp({
-      projectId: firebaseConfig.projectId
-    });
+    
+    // For local development, prioritize GOOGLE_APPLICATION_CREDENTIALS env if set
+    // Otherwise try to initialize with Project ID only (works natively in Cloud Run)
+    if (!admin.apps.length) {
+      if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+        console.log('[Firebase] Using service account from GOOGLE_APPLICATION_CREDENTIALS');
+        admin.initializeApp({
+          credential: admin.credential.applicationDefault(),
+          projectId: firebaseConfig.projectId
+        });
+      } else {
+        admin.initializeApp({
+          projectId: firebaseConfig.projectId
+        });
+      }
+    }
+    
     firebaseDb = getFirestore(admin.app(), firebaseConfig.firestoreDatabaseId);
     console.log(`Firebase Admin initialized: Project ${firebaseConfig.projectId}, Database: ${firebaseConfig.firestoreDatabaseId}`);
   } else {
@@ -141,14 +155,15 @@ async function startServer() {
     const clientId = process.env.YOUTUBE_CLIENT_ID;
     const clientSecret = process.env.YOUTUBE_CLIENT_SECRET;
     
-    // Derive base URL: Priority 1: APP_URL env, Priority 2: Request headers
+    // Derive base URL for Redirect URI
     let baseUrl = process.env.APP_URL;
-    if (!baseUrl) {
+    if (!baseUrl || baseUrl.includes('localhost')) {
+      // In local dev, use the actual host header
       const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-      const host = req.headers['x-forwarded-host'] || req.get('host');
+      const host = req.get('host');
       baseUrl = `${protocol}://${host}`;
     }
-    baseUrl = baseUrl.replace(/\/$/, ''); // Remove trailing slash
+    baseUrl = baseUrl.replace(/\/$/, '');
 
     const redirectUri = `${baseUrl}/api/auth/youtube/callback`;
     console.log(`[YouTube OAuth] Using Redirect URI: ${redirectUri}`);
