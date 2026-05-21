@@ -159,14 +159,14 @@ async function startServer() {
 
   // --- YouTube OAuth ---
   
-  function getYoutubeOauth2Client(req: express.Request) {
+  function getYoutubeOauth2Client(req?: express.Request) {
     const clientId = process.env.YOUTUBE_CLIENT_ID;
     const clientSecret = process.env.YOUTUBE_CLIENT_SECRET;
     
     // Derive base URL for Redirect URI
-    let baseUrl = process.env.APP_URL;
-    if (!baseUrl || baseUrl.includes('localhost')) {
-      // In local dev, use the actual host header
+    let baseUrl = process.env.APP_URL || 'http://localhost:3000';
+    if (req && (!process.env.APP_URL || process.env.APP_URL.includes('localhost'))) {
+      // In local dev, use the actual host header if request is available
       const protocol = req.headers['x-forwarded-proto'] || req.protocol;
       const host = req.get('host');
       baseUrl = `${protocol}://${host}`;
@@ -174,7 +174,8 @@ async function startServer() {
     baseUrl = baseUrl.replace(/\/$/, '');
 
     const redirectUri = `${baseUrl}/api/auth/youtube/callback`;
-    console.log(`[YouTube OAuth] Using Redirect URI: ${redirectUri}`);
+    // Only log if req is present to avoid spamming background tasks unnecessarily, or just log occasionally
+    // console.log(`[YouTube OAuth] Using Redirect URI: ${redirectUri}`);
     
     return {
       client: new google.auth.OAuth2(clientId, clientSecret, redirectUri),
@@ -596,7 +597,7 @@ async function startServer() {
       if (platforms.yt && ytAuth) {
         console.log('[Step 2] Uploading to YouTube Shorts...');
         try {
-          const oauth2Client = getYoutubeOauth2Client();
+          const { client: oauth2Client } = getYoutubeOauth2Client();
           oauth2Client.setCredentials(ytAuth);
           
           const youtube = google.youtube({ version: 'v3', auth: oauth2Client });
